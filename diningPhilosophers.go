@@ -1,78 +1,124 @@
-// Implement the dining philosopher’s problem with the following constraints/modifications.
-
-//     There should be 5 philosophers sharing chopsticks, with one chopstick between each adjacent pair of philosophers.
-//     Each philosopher should eat only 3 times (not in an infinite loop as we did in lecture)
-//     The philosophers pick up the chopsticks in any order, not lowest-numbered first (which we did in lecture).
-//     In order to eat, a philosopher must get permission from a host which executes in its own goroutine.
-//     The host allows no more than 2 philosophers to eat concurrently.
-//     Each philosopher is numbered, 1 through 5.
-//     When a philosopher starts eating (after it has obtained necessary locks) it prints “starting to eat <number>” on a line by itself, where <number> is the number of the philosopher.
-//     When a philosopher finishes eating (before it has released its locks) it prints “finishing eating <number>” on a line by itself, where <number> is the number of the philosopher.
 package main
-import(
-       "fmt"
-       "sync"
-       "math/rand"
-       )
-type ChopS struct{sync.Mutex}
 
-type Philo struct {
-  leftCS, rightCS *ChopS
-  id int
-  // status string
+import (
+	"fmt"
+	"sync"
+)
+
+const maxEat = 3
+const maxPermissions = 5 * maxEat
+const maxSimultaneousEat = 2
+
+var permissionMutex sync.Mutex
+
+type chopStick struct {
+	sync.Mutex
 }
 
-func host(philos *[]*Philo, host_wg *sync.WaitGroup) { 
-  var wg sync.WaitGroup
-  counter := 0
-  defer host_wg.Done()
-  for i := 0; i<5; i++ {
-    wg.Add(1)
-    counter++
-    go (*philos)[i].eat(&wg)
-    if (counter == 2 || i == 4) {
-      wg.Wait()
-      counter = 0
-    } 
-  }
+type philosopher struct {
+	left  *chopStick
+	right *chopStick
+	id    int
 }
 
-func (p *Philo) eat(wg *sync.WaitGroup) {
-    defer wg.Done()
-    for i:=0; i<3; i++ {
-        p.leftCS.Lock()
-        p.rightCS.Lock()
-        fmt.Printf("starting to eat %d\n", p.id)
-        fmt.Printf("finishing eating %d\n", p.id)
-        p.leftCS.Unlock()
-        p.rightCS.Unlock() 
-    }
+func (p *philosopher) eat() {
+	fmt.Printf("starting to eat %d\n", p.id+1)
+	fmt.Printf("finishing eating %d\n", p.id+1)
+}
+
+func (p *philosopher) askPermission(c chan int, per chan bool) {
+	c <- p.id
+	per <- true
+}
+
+func (p *philosopher) done(d chan bool) {
+	d <- true
+}
+
+func (p *philosopher) Lock() {
+	p.left.Lock()
+	p.right.Lock()
+}
+
+func (p *philosopher) Unlock() {
+	p.left.Unlock()
+	p.right.Unlock()
+}
+
+func (p *philosopher) run(c chan int, per chan bool, done chan bool, wg *sync.WaitGroup) {
+	var i int
+	for {
+		permissionMutex.Lock()
+		p.askPermission(c, per)
+		status := <-per
+		<-c
+		if status {
+			p.Lock()
+			permissionMutex.Unlock()
+			p.eat()
+			i++
+			p.Unlock()
+			p.done(done)
+		} else {
+			permissionMutex.Unlock()
+		}
+		if i == maxEat {
+			fmt.Println("\nPhilosopher : ", p.id+1, " done 	\n")
+			break
+		}
+	}
+	wg.Done()
+}
+
+func host(c chan int, per chan bool, d chan bool) {
+	var permissionTable = make([]int, 5, 5)
+	var currentPGranted int
+	var totalPGranted int
+	for i := 0; i < maxPermissions; i++ {
+		status := <-per
+		id := <-c
+		if status && (currentPGranted < maxSimultaneousEat) && (permissionTable[id] < maxEat) {
+			permissionTable[id]++
+			currentPGranted++
+			totalPGranted++
+			per <- true
+			c <- id
+		} else {
+			per <- false
+			c <- id
+		}
+		var done bool
+		select {
+		case done = <-d:
+			if done {
+				currentPGranted--
+			}
+		default:
+
+		}
+	}
 }
 
 func main() {
-  // Init the array of philosophers
-  CSticks := make([]*ChopS, 5)
-  for i := 0; i < 5; i++ {
-     CSticks[i] = new(ChopS)
-  }
-  philos := make([]*Philo, 5)
-  var host_wg sync.WaitGroup
-  for i := 0; i < 5; i++ {
-      // chopstics index gen
-     var chopsticsL, chopsticsR int
-     chopsticsL, chopsticsR = func() (int, int) {
-        lc := rand.Intn(5)
-        rc := rand.Intn(5)
-        for lc == rc {
-          lc = rand.Intn(5)
-        }
-        return lc, rc
-      }()
-     philos[i] = &Philo{CSticks[chopsticsL], CSticks[chopsticsR], i+1}
-  }
-  host_wg.Add(1)
-  go host(&philos, &host_wg)
-  host_wg.Wait()
-  fmt.Println("Press any key to exit")
-  fmt.Scanln()
+
+	var wg sync.WaitGroup
+	var cstics = make([]*chopStick, 5, 5)
+	var philo = make([]*philosopher, 5, 5)
+	for i := 0; i < 5; i++ {
+		cstics[i] = new(chopStick)
+	}
+	for i := 0; i < 5; i++ {
+		philo[i] = &philosopher{cstics[i], cstics[(i+1)%5], i}
+	}
+
+	var per = make(chan bool, 100)
+	var c = make(chan int, 100)
+	var d = make(chan bool, 100)
+
+	wg.Add(5)
+	go host(c, per, d)
+	for i := 0; i < 5; i++ {
+		go philo[i].run(c, per, d, &wg)
+	}
+	wg.Wait()
 }
